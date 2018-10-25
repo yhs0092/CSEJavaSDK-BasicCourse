@@ -227,6 +227,8 @@ ServiceComb提供了默认的性能统计模块，[Metrics][Metrics]。启用方
 
 ## HttpServerFilter/HttpClientFilter机制
 
+## VertxHttpDispatcher机制
+
 ## 启动事件监听机制
 
 ## CSEJavaSDK中的加载机制总结
