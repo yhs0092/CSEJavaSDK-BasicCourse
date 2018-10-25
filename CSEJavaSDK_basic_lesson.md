@@ -191,7 +191,7 @@ Reactive在性能方面有着巨大的优势，但是却并非完美无缺的。
 因此，是否使用Reactive模式进行开发，需要设计和开发人员结合实际情况进行取舍。
 
 > PS：
-> - 默认的EdgeService工作于Reactive模式，因为EdgeService几乎没有用户编写业务代码。当在EdgeService上开发扩展模块的时候，要注意避免阻塞网络线程。
+> - 默认情况下的[EdgeService][EdgeService]工作于Reactive模式，因为EdgeService几乎没有用户编写业务代码。当在EdgeService上开发扩展模块的时候，要注意避免阻塞网络线程。
 > - 由于前文说到的业务线程池可以自行配置，所以通过REST接口返回类型是否是`CompletableFuture`来判断是否是Reactive的方法只能涵盖一般情况。最直接的方法是调试的时候在自己的业务代码里面打断点看一下线程的名字，像"pool-3-thread-3"这种名字的线程是业务线程，说明是同步工作模式；"transport-vert.x-eventloop-thread-4"这种名字是网络线程，说明是Reactive模式。
 
 ## Metrics和性能测试
@@ -223,27 +223,127 @@ ServiceComb提供了默认的性能统计模块，[Metrics][Metrics]。启用方
 
 # 扩展机制
 
+> ServiceComb提供了较多的扩展机制，供用户实现特定业务场景下的功能。这里介绍几种比较重要或常用的，扩展机制的说明都可以在[ServiceComb文档][ServiceComb文档]里面找到。
+
 ## Handler机制
+
+![](pic/extension/request_processing_flow.PNG "请求处理流程（RestOverVertx传输方式、同步工作模式）")
+
+上图展示了一次请求被微服务实例处理，并且调用下游系统的处理流程。在同步工作模式下，橙色部分运行于网络线程，蓝色部分运行于业务线程。
+
+可以看到，provider端和consumer端的handler链包裹住了业务处理逻辑。ServiceComb中的大部分治理能力都是由Handler机制实现的。
+
+### 接口简述
+
+```java
+public interface Handler {
+  default void init(MicroserviceMeta microserviceMeta, InvocationType invocationType) {
+  }
+
+  void handle(Invocation invocation, AsyncResponse asyncResp) throws Exception;
+}
+```
+
+上面是Handler接口的定义，需要关注的是其handle方法。其中的Invocation参数中携带了本次调用相关的信息（每次请求都对应生成了一个Invocation对象来表示）；AsyncResponse则是一个函数式接口，方便开发者定义处理返回结果的回调函数，并且包装了几个常用的发送返回值的方法。
+
+### 开发Handler处理逻辑
+
+如果你不知道该怎么开发一个Handler的话，除了参照ServiceComb的demo，也可以参考ServiceComb提供的默认handler。当前最适合做例子的应该是用于限流的Handler了。[ServiceComb文档][HandlerChain]中也有其他Handler的介绍。
+
+```java
+@Override
+public void handle(Invocation invocation, AsyncResponse asyncResp) throws Exception {
+  if (!Config.INSTANCE.isConsumerEnabled()) {
+    invocation.next(asyncResp); // 不做处理，将此次调用放行给下一个handler处理
+    return;
+  }
+
+  QpsController qpsController = qpsControllerMgr.getOrCreate(invocation.getMicroserviceName(), invocation);
+  if (qpsController.isLimitNewRequest()) {
+    // return http status 429
+    CommonExceptionData errorData = new CommonExceptionData("rejected by qps flowcontrol");
+    asyncResp.consumerFail( // 错误情形，请求不再往下游走，直接返回错误结果
+        new InvocationException(QpsConst.TOO_MANY_REQUESTS_STATUS, errorData));
+    return;
+  }
+
+  invocation.next(asyncResp); // 处理完成，将此次调用放行给下一个handler处理
+}
+```
+上面是qps-flowcontrol-consumer handler的处理逻辑，从中可以看出开发一个Handler的基本操作如下：
+1. 如果不需要处理该请求，或者请求已经处理完毕，需要将该请求放行到后面的处理逻辑，就调用`invocation.next(asyncResp)`让`invocation`接着走后面的handler链。
+2. 如果不需要执行后续的处理逻辑，而是要直接返回一个结果，那么应该调用`asyncResp`的`handle(Response response)`方法，返回一个Response。或者调用它的各种包装方法，返回一个成功或失败的结果。
+
+> **注意**：由于Handler链处理逻辑全都是异步调用的，因此写这一部分的处理逻辑时必须保证，无论走哪条逻辑分支都要有回调方法被调用，要么调`invocation.next(asyncResp)`将请求进行下去，要么调`asyncResp.handle(Response response)`立即返回一个结果。否则就会出现请求处理逻辑走到一半就结束，任何结果都不返回的情况。这样会造成一种令人困惑的问题场景，即请求代码走到一半就什么事情都不做了，好像工作已经完成了一样；而调用方还在一直等待结果返回，直到报错。
+
+### 配置和加载Handler
+
+要想自定义的Handler能够正常加载使用，首先需要给出一份Handler配置文件，指明Handler的名字和类型。具体写法可以直接参照ServiceComb开源代码里提供的默认Handler。Handler配置文件的加载逻辑在`HandlerConfigUtils`类的`loadConfig()`方法里，从其中读配置的代码可以看出，它会去classpath下的config目录读取"*.handler.xml"文件。
+```java
+List<Resource> resList =
+    PaaSResourceUtils.getSortedResources("classpath*:config/cse.handler.xml", ".handler.xml");
+```
+
+Handler实例是根据配置中的类型信息`new`出来的。Handler链和Handler实例都不是单例的，默认的Handler链和具体配置到某个微服务上的Handler链都是启动时新实例化出来的，链上的Handler实例也是如此。
+> 推荐大家去`AbstractHandlerManager.create(String microserviceName)`方法里打个断点调试一下，看看Handler链的初始化逻辑。
+
+> **注意**：ServiceComb提供的Handler中，有一个比较特殊，就是"loadbalance"。因为它是唯一一个一旦缺少就会报错，而且又是需要配置在handler链配置项中的Handler。一般而言，如果你没有显式地配置过consumer端handler链，那么会有默认的配置将loadbalance带上，而一旦你显式地配置了consumer端handler，那么就必须自己把loadbalance带上。否则缺少了loadbalance模块，consumer端发送请求的时候少了选择实例endpoint的过程，等到了客户端发送请求的时候就会报错。SDK会抛出一个异常，错误内容为`Endpoint is empty. Forget to configure "loadbalance" in consumer handler chain?``
 
 ## HttpServerFilter/HttpClientFilter机制
 
+### Filter机制简介
+
+Filter在Handler链的外围，它们可以在provider端接收请求后和返回应答前，以及consumer端发送请求前和接收应答后，这四个时间点执行一些逻辑。
+
+实现这两个接口所必须要实现的方法，除了`getOrder()`以外，就是server filter的`Response afterReceiveRequest(Invocation invocation, HttpServletRequestEx requestEx)`和client filter的`Response afterReceiveResponse(Invocation invocation, HttpServletResponseEx responseEx)`。  
+参数表中的invocation也就是前文中Handler处理的`invocation`。以provider端为例，对于一次请求，会实例化一个Invocation实例，该实例先经过server filter处理，再经过provider端handler链，consumer端亦然。  
+至于另外一个参数`requestEx`/`responseEx`，是ServiceComb模拟出来的一个HttpServletRequest/HttpServletResponse对象。它们在内部实现细节上和真正采用Servlet开发风格的代码所拿到的request/response对象存在不同，不能直接将操作方式照搬过来。
+
+> 有些具有Servlet风格项目开发经验的开发看到filter机制的接口，会直接使用原生的Servlet处理方式写代码，结果发现达不到预期的效果。所以需要大家注意一下，ServiceComb是一个REST风格的微服务开发框架，在参数传递和业务处理上不能照搬Servlet开发方式。
+
+关于filter的触发执行方式，基本上可以看做是将一个有序的filter list进行遍历，调用相应的处理方法，如`afterReceiveRequest()`方法。Filter的方法是有返回值的，如果方法返回了一个Response，那么遍历就会终止，并且直接返回这个Response。如果想要接着执行后续的Filter，就需要在方法里返回`null`。
+
+### Filter机制的配置和加载
+
+Filter机制采用SPI加载机制加载实现类实例，SPI机制是Java提供的一套接口扩展和加载机制。要使自己定义的SPI扩展类能够正常加载启用，需要在项目的resources/META-INF/services目录下建立一个与接口同名的文件，将实现类的类名写进去。例如，如果自定义了一个`com.xxx.yyy.CustomFilter`，实现了HttpServerFilter接口，那么就需要在resources/META-INF/services目录下创建一个名为"org.apache.servicecomb.common.rest.filter.HttpServerFilter"的文件，里面写上"com.xxx.yyy.CustomFilter"。这样启动的时候就会加载CustomFilter了。
+
 ## VertxHttpDispatcher机制
+
+VertxHttpDispatcher用于向Vertx的[Router][BasicVert.x-WebConcepts]增加[路由规则][VertxRoute]，并在路由规则下挂载处理请求、异常等的[handler][VertxHandler]。可以说，这里是provider端请求的处理流程中，Vertx逻辑和ServiceComb逻辑的边界。
+
+VertxHttpDispatcher的逻辑运行于网络线程中，在这里自定义扩展时要注意不能阻塞网络线程。
+
+通常情况下，ServiceComb所提供的`VertxRestDispatcher`和`DefaultEdgeDispatcher`已经能够满足普通provider服务和[EdgeService服务][EdgeService]开发的需求。而且VertxHttpDispatcher的实现涉及到ServiceComb较底层逻辑，因此在这里扩展的代码会与ServiceComb的底层实现产生一定程度的耦合，也比较容易出错，所以一般不推荐用户在这个机制上自定义扩展。
+
+VertxHttpDispatcher也是使用SPI机制加载的，并且会根据`getOrder()`方法的返回值排序使用，如果一个REST请求没有被前一个Dispatcher匹配中，就会接着跟下一个Dispatcher的路由规则匹配。ServiceComb提供的Dispatcher中比较特殊的是`VertxRestDispatcher`，因为它的order是`Integer.MAX_VALUE`，不会有Dispatcher排在它的后面了，而且它没有设置路由规则，因此会接下所有请求。
 
 ## 启动事件监听机制
 
-## CSEJavaSDK中的加载机制总结
+ServiceComb框架在服务启动和退出的时候会发布特定的事件，如果需要在服务实例生命周期的特定时间点上做一些处理，可以实现ServiceComb的`BootListener`接口来监听事件。事件类型都定义在`BootListener`接口的`EventType`枚举中，事件的发布逻辑都在`SCBEngine`类中。大家可以在开源代码里搜索一下调用关系看看。
 
-### SPI加载机制
-
-### handler.xml加载机制
-
-### Spring Bean加载机制
+一个典型的应用场景，比如某些服务的实例需要在启动完成后立即做一次调用其他服务的操作，那么就可以监听启动事件，在接收到`AFTER_REGISTRY`事件时进行处理。因为`AFTER_REGISTRY`事件的发布意味着微服务实例已经注册到sc上，整个启动流程已经完成了。
 
 -----------------------------------------------------------
 
 # 常见问题及定位技巧
 
-## 各种加载机制的检查
+## CSEJavaSDK中的加载机制
+
+CSEJavaSDK中使用的加载机制主要有三种，分别是SPI加载机制、handler.xml加载机制、Spring Bean加载机制，这三种机制各有特点。
+
+SPI机制只要是扫描到了SPI加载文件就会加载扩展类的实例。这种机制对于扩展类的个数没有要求，无论是加载多个还是一个都加载不到都不会报错，因此当漏加载扩展类类时，要到了微服务实例运行的时候才会出现问题，而且有时候问题表现还不太直观。好在ServiceComb使用的SPI加载工具会在加载扩展类的时候答应日志，只需要查看日志就能够很方便地看出有多少扩展类实际启用了。例如如下日志就说明这个微服务实例加载了三个HttpServerFilter的扩展类:
+```
+[INFO] Found SPI service org.apache.servicecomb.common.rest.filter.HttpServerFilter, count=3. org.apache.servicecomb.foundation.common.utils.SPIServiceUtils.loadSortedService(SPIServiceUtils.java:76)
+[INFO]   0. org.apache.servicecomb.common.rest.filter.inner.ServerRestArgsFilter. org.apache.servicecomb.foundation.common.utils.SPIServiceUtils.loadSortedService(SPIServiceUtils.java:79)
+[INFO]   1. com.github.yhs0092.csedemo.edge.auth.SessionToContextFilter. org.apache.servicecomb.foundation.common.utils.SPIServiceUtils.loadSortedService(SPIServiceUtils.java:79)
+[INFO]   2. org.apache.servicecomb.common.rest.filter.tracing.TracingFilter. org.apache.servicecomb.foundation.common.utils.SPIServiceUtils.loadSortedService(SPIServiceUtils.java:79)
+```
+
+handler.xml加载机制是ServiceComb专门用于Handler加载的，启动过程中扫描到了handler.xml也不一定会加载里面的扩展类，还需要将该扩展类配进handler链才会实例化该扩展类。handler.xml文件的加载过程不会打印日志。不过如果是本地调试的话，可以在HandlerConfigUtils类的loadConfig()方法里打断点查看配置文件加载情况。另外，如果在handler链配置上指定了某个handler，但是在配置文件中却找不到它，那么SDK会直接抛出错误`throw new Error("can not find handler :" + handlerId)`。
+
+Spring Bean加载机制是通用的开源加载机制，在此不再赘述，只有两点需要补充说明一下。  
+- 有些开发者问询问为什么他们在自己扩展的Handler等类里面使用`@Autowired`或者`@Inject`标记的属性，在运行时会是`null`。这是因为Handler的加载机制是ServiceComb自己将handler实例"new"出来，不是走Spring Bean加载机制实例化的，因此Spring框架也不会对其做自动注入。碰到这种情况可以考虑使用ServiceComb的`BeanUtils`类提供的`getBean(String name)`方法来手动获取和设置Spring Bean。
+- 使用`BeanUtils.getBean(String name)`方法要注意调用的时间点，如果在Spring Bean还未加载完成时调用该方法，有可能会导致NoSuchBeanDefinitionException。另外在Spring Bean实例中建议直接使用Spring的依赖注入机制来初始化属性，不要使用`BeanUtils.getBean(String name)`方法。因为`BeanUtils.getBean(String name)`方法的调用不会被Spring框架纳入Spring Bean加载顺序的考虑范畴，因此也有可能由于Bean加载顺序的混乱而导致NoSuchBeanDefinitionException。
 
 ## 契约生成
 
@@ -271,6 +371,7 @@ TODO: 还有代码自动生成的逻辑
 
 [Java-Chassis代码库]: https://github.com/apache/incubator-servicecomb-java-chassis "ServiceComb-Java-Chassis代码库"
 [CSEJavaSDK华为云官网文档]: https://support.huaweicloud.com/devg-cse/cse_javaSDK.html "CSEJavaSDK华为云官网文档"
+[ServiceComb文档]: https://docs.servicecomb.io/java-chassis/zh_CN/index.html "ServiceComb文档"
 [ServiceComb-Java-Chassis微服务系统架构]: https://docs.servicecomb.io/java-chassis/zh_CN/start/architecture.html "ServiceComb-Java-Chassis微服务系统架构"
 [用SpringMVC开发微服务]: https://docs.servicecomb.io/java-chassis/zh_CN/build-provider/springmvc.html "用SpringMVC开发微服务"
 [用JAX-RS开发微服务]: https://docs.servicecomb.io/java-chassis/zh_CN/build-provider/jaxrs.html "用JAX-RS开发微服务"
@@ -289,3 +390,8 @@ TODO: 还有代码自动生成的逻辑
 [RestOverVertx]: https://docs.servicecomb.io/java-chassis/zh_CN/build-provider/protocol/rest-over-vertx.html "RestOverVertx"
 [Metrics]: https://docs.servicecomb.io/java-chassis/zh_CN/general-development/metrics.html "Metrics"
 [ServiceComb的开放性设计]: https://bbs.huaweicloud.com/blogs/1fc9427c088611e89fc57ca23e93a89f "ServiceComb的开放性设计"
+[HandlerChain]: https://docs.servicecomb.io/java-chassis/zh_CN/references-handlers/intruduction.html "处理链参考"
+[BasicVert.x-WebConcepts]: https://vertx.io/docs/vertx-web/java/#_basic_vert_x_web_concepts "Basic Vert.x-Web concepts"
+[VertxRoute]: https://vertx.io/docs/apidocs/io/vertx/ext/web/Route.html "Vertx Route"
+[VertxHandler]: https://vertx.io/docs/apidocs/io/vertx/core/Handler.html "Vertx Handler"
+[EdgeService]: https://docs.servicecomb.io/java-chassis/zh_CN/edge/by-servicecomb-sdk.html "EdgeService"
