@@ -67,7 +67,9 @@
 在定义REST服务接口的时候，需要遵守一个原则，即服务接口能够被服务契约明确地描述出来。如果你觉得自己写的接口中有个方法的参数表无法明确地用契约描述，那么这种用法基本上就是不被ServiceComb支持的。例如，返回值类型是抽象类、使用一个Map来接收所有的query参数。
 > 抽象的返回值类型即使在provider端能够被序列化，在consumer端将其反序列时也会因为框架不知道该转换为何种具体类型而出问题；而使用Map来接收query参数，也会因为query参数信息的缺失而给中间的运行模型实现带来麻烦。因此，这些特性当前都是不支持的。
 >
->建议阅读“[接口定义和数据类型][接口定义和数据类型]”以了解更多说明。
+> 建议阅读“[接口定义和数据类型][接口定义和数据类型]”以了解更多说明。
+>
+> 对象类型参数和返回值建议使用标准的JavaBean类型定义，以避免潜在的参数传递问题。
 
 ### 契约的来源
 
@@ -77,19 +79,155 @@
 
 ## 服务注册
 
+每个微服务实例在启动的时候都会将自己的微服务信息、实例信息注册到服务中心。
+
+### 注册微服务信息
+
+首先注册的是微服务信息，`MicroserviceRegisterTask`会首先根据appId、serviceName、version、env这几个参数去服务中心查询微服务记录是否存在，如果存在，SDK就会直接将查到的serviceId保存下来；如果不存在，SDK会将微服务记录注册到sc上，包含appId、serviceName、version、schema名称、env这几个信息，并将sc返回的serviceId保存。  
+接着还需要注册契约的内容。SDK会去sc批量查询微服务中包含的所有契约的名称及其对应的hash值，并跟本地契约进行比对（为了保证旧版本的兼容性，如果hash值不存在，则会直接从sc拉取契约内容进行比对）。如果出现契约不一致的情况（本地契约多了、少了、内容改变）：
+- 当env设置为开发态时（配置项`service_description.environment`=`development`），SDK会将内容不一致的契约和本地多出来的契约注册上去，而sc中多出来的契约则不会删除（但会有告警日志）；
+- 当env为其他值时，会直接报错，在日志中打印sc和本地契约信息不一致的错误日志，以避免生产环境因微服务集群中混入了接口不一致的微服务实例而导致的难以定位的错误。
+> 需要注意的是，虽然开发态支持provider端修改接口后直接重启并更新契约到sc，但是consumer端只会在初次调用该微服务记录的实例时加载一次契约，后续不会更新，因此调试过程中一旦修改REST服务接口，需将provider端、consumer端实例都重启一次。
+
+### 注册实例信息
+
+微服务信息注册成功后，会接着运行微服务实例的注册任务`MicroserviceInstanceRegisterTask`，将该实例的endpoint信息、心跳时间间隔、最大心跳失败次数注册到服务中心上去。
+
+实例的endpoint信息就是该实例发布到sc的，供其他微服务调用的地址。一个实例可以有多个endpoint，例如如果实例同时启用了REST传输方式和highway传输方式，那么它就会注册两个endpoint到sc。需要注意：一个实例的监听地址和它发布到sc的endpoint（发布地址）不是等同的，一般开发时配置的`servicecomb.rest.address`和`servicecomb.highway.address`是监听地址，SDK会自动根据监听地址推断发布地址。但是某些SDK推断机制达不到要求的情况下，就需要开发者自行制定发布地址了，详见[服务监听地址和发布地址][服务监听地址和发布地址]。
+
+心跳时间间隔和最大心跳失败次数会影响sc判断实例下线的行为。当sc在`心跳时间间隔*(最大心跳失败次数+1)`长的时间段内都没有收到实例心跳请求，则会认为该实例已经意外关闭，会将实例下线。相关配置见[访问服务中心][访问服务中心]。这个参数可以进行调整以满足特定场景，但是需要注意，这两个参数调得太大会导致sc不能及时感知实例异常下线的情况；调得太小会加重网络负载，并且在某些通过APIGateway或LB访问sc的场景下还会因触发限流而导致频繁的心跳失败，容易让实例被sc误下线。
+
+### 实例注销（优雅停机）
+
+正常情况下微服务实例退出时，JVM会触发SDK注册的shutdown hook，执行一系列清理操作并且向sc发送注销实例的请求，使得该实例可以及时下线。  
+由于JVM的限制，shutdown hook只能在正常关闭进程时触发，如果是强制杀进程（`kill -9`），则shutdown hook不会被触发，只能由sc感知心跳超时来下线实例。
+
 ## 微服务调用
+
+微服务的调用方式分为[RestTemplate调用][RestTemplate调用]和[RPC调用][RPC调用]两种开发方式。用户可以自行选择喜欢的方式开发调用代码。
+
+服务调用方并不是在刚启动的时候就去sc查询自己所调用的服务的信息，而是采用懒加载机制，等到调用第一次发生时，再从服务中心拉取微服务的契约信息和实例信息。特定服务的特定版本的契约只会加载一次，而实例信息会在后续由一个定时调度线程池定期刷新。
+
+SDK中跟调用相关的治理能力基本都是在consumer端handler链里面做的，包括熔断容错、负载均衡等。使用这些能力并不需要用户在调用代码里增加额外的逻辑。当provider端有多个实例时，实例的选取逻辑主要是在负载均衡模块做的，不需要用户显式指定调用特定的实例。（当前版本用户也做不了指定，这个在微服务多实例部署的场景下没有什么意义）
+
+> 服务调用时有一些问题需要注意：
+> - 由于ServiceComb提供的RestTemplate是扩展自Spring的RestTemplate，并且保留了Spring原生的调用机制。有时候会见到用户在使用的ServiceComb的RestTemplate做调用时，url写的却是“http://{ip}:{port}/path”这样的。使用这种url也可以将请求发送出去，但是走的却是Spring原生的机制，ServiceComb的各种治理机制、通信模块都没有生效。由于调用也能通过，有时候这种失误在本地开发、调试的时候不容易被察觉。正确的url应该是“cse://{microserviceName}/path”这样的。注意url的scheme的区别。
+> - ServiceComb的consumer端和provider端是解耦合的，也就是说只要调用方式和服务契约对得上，ServiceComb不限制用户使用何种方式开发、何种线程模式运行consumer和provider。换言之，provider端可以是用JAX-RS模式开发，工作于同步模式；consumer端使用RestTemplate模式调用，工作于[Reactive模式][Reactive模式]，这样是完全能够调通的。
+> - 推荐用户在编写调用方代码时将对象类型的参数名称设置为跟契约描述的完全一致。举个例子，如果某provider接口返回一个对象类型`com.xxx.yyy.OprResponse`，那么consumer端用于RPC调用的代理接口、或RestTemplate调用代码里指定的返回值类型最好也是`com.xxx.yyy.OprResponse`，即返回对象的类名、包名完全一致。因为这样可以让Java认为反序列话得到的Java对象类型和调用端业务代码用于接收返回值的类型一致，从而减少一次Java类型转换过程，提高调用性能。
 
 ## 配置加载和动态刷新
 
+### 日志配置
+
+在这里先提一下日志的配置。ServiceComb直接依赖的是slf4j的日志打印接口，默认使用的日志打印实现是Log4j，配置文件是property文件。  
+ServiceComb读取的日志文件名为`log4j.*.properties`，从classpath下，或classpath中的config目录读取。
+> ServiceComb会从微服务项目还有SDK自身jar包里加载日志配置文件，按优先级高低将其合并为一份生效的配置。如果优先级最高的一份配置文件所在的目录可写（通常这是用户放了一份日志配置在某个磁盘目录中），则ServiceComb会将合并后的日志配置输出到这个目录，名字是`merged.log4j.properties`，便于排查日志问题。  
+> 如果目录不可写，会打印一行错误日志，但出现这个信息日志系统也是能正常工作的：  
+> Can not output merged.log4j.properties,because can not write to directory of file ...
+
+### 配置文件加载
+
+ServiceComb使用的配置文件是microservice.yaml文件，从classpath下读取。ServiceComb会将磁盘中的配置文件作为高优先级文件，覆盖jar包内的配置。配置文件的优先级是可以设置的，通过在配置文件中设置`servicecomb-config-order`，可以指定配置的优先级，数值大的优先级高。  
+例如，java-chassis-core包中就有一份默认的配置文件，将优先级设置得较低，方便用户覆盖配置：
+```yaml
+servicecomb-config-order: -500
+```
+> 我们比较推荐用户在打jar包的时候将"."目录打进classpath，这样可以直接放一份microservice.yaml文件到服务jar包所在目录来覆盖jar包内的配置，方便运维和问题定位。
+
+ServiceComb也支持其他的配置途径，按优先级从高到低来说：
+动态配置 > System property > 环境变量 > 从Spring获取的配置 > microservice.yaml文件
+
+> - System property 通过-Dxxx=yyy配置
+> - 从Spring获取配置是为了方便SpringBoot和SpringCloud的开发者将他们的服务接入到ServiceComb，这样做可以沿用之前的application.properties配置。但是读取application.properties配置的一系列功能是SpringBoot具备的，Spring框架本身没有。所以用户使用原生的ServiceComb（或CSEJavaSDK）开发时，不能使用appilcation.properties配置。当从Spring框架拿到了配置时，会打印一行`Environment received, will get configurations from ...`的日志。
+> - SDK会将读取到的microservice.yaml文件位置打在日志里，方便定位问题，如：
+```
+[INFO] create local config: org.apache.servicecomb.config.ConfigUtil.createLocalConfig(ConfigUtil.java:114)
+[INFO]  jar:file:/D:/.m2/repository/org/apache/servicecomb/java-chassis-core/1.1.0.B011/java-chassis-core-1.1.0.B011.jar!/microservice.yaml. org.apache.servicecomb.config.ConfigUtil.createLocalConfig(ConfigUtil.java:116)
+[INFO]  jar:file:/D:/.m2/repository/com/huawei/paas/cse/cse-solution-service-engine/2.3.39/cse-solution-service-engine-2.3.39.jar!/microservice.yaml. org.apache.servicecomb.config.ConfigUtil.createLocalConfig(ConfigUtil.java:116)
+[INFO]  file:/D:/IdeaProjects/ServiceCombDemo/CSEAccountAuthExample/account-service/target/classes/microservice.yaml. org.apache.servicecomb.config.ConfigUtil.createLocalConfig(ConfigUtil.java:116)
+```
+
+### 动态配置
+
+配置加载处于ServiceComb启动流程中靠前的位置，如果从本地配置中读到了配置中心的地址，那么还会立即从配置中心读取一次动态配置，再进行后续的启动流程。即使这次读取配置中心的配置失败了，启动流程也会继续进行下去。启动完成后，会有定时任务定时从cc读取配置。
+
+连接配置中心的客户端是通过SPI加载机制加载的，只要引入了对应的依赖就可以加载配置中心客户端。如果没有可用的cc客户端，会打印提示日志`config center SPI service can not find, skip to load configuration from config center`；而如果加载了cc客户端，却找不到对应的cc地址配置，会打印`Config Source serverUri is not correctly configured.`。
+
+ServiceComb使用Netflix的Archaius来管理全部的配置。无论配置的来源是cc、环境变量、还是配置文件，都可以使用Archaius提供的API来使用配置。
+
+配置中心连接的配置以及配置信息的使用可以参考文档[动态配置][动态配置]。
+
 ## 线程模型、reactive
 
+ServiceComb是基于Vert.x开发的，Vertx依赖Netty，是一个具有异步非阻塞特点的框架。它是ServiceComb高性能的基础，但也让ServiceComb的线程模型看上去与传统的服务框架有所不同。ServiceComb线程模型的开源文档在[这里][线程模型]，使用ServiceComb原生的开发方式时，其传输方式为[Rest over Vertx][RestOverVertx]传输方式。
+
+### RestOverVertx传输方式、同步工作模式下的线程模型
+
+> 对于ServiceComb的入门使用者来说，判断一个微服务provider是不是工作于同步模式，只需要看它的所有REST服务接口是否都是直接返回应答对象类型就可以了。如果有CompletableFuture类型的返回值，那么一般都是[Reactive模式][Reactive模式]的。
+
+简单来说，ServiceComb的网络线程和连接池是一对一的关系。对于业务线程而言，当第一次调用发生时，它会绑定到特定的一个网络线程上，再绑定网络线程内特定的连接，以避免冲突。
+
+服务端方面，当请求到达微服务实例时，首先是网络线程从网络连接中接收到请求，经过一些处理后切换到业务线程运行用户的业务逻辑。切换到业务线程后，网络线程就可以去处理下一个请求了。网络线程会一直处于对请求轮询处理的状态，**开发者要避免做阻塞网络线程的操作**，如访问数据库、发送REST请求等。等业务线程返回应答的时候，业务线程会通过回调发送应答的逻辑。
+
+客户端方面，业务线程发送请求时，首先会在业务线程中对请求做一些处理（包括consumer端handler链、HttpClientFilter），然后转移到网络线程中进行发送。在等待应答的过程中，业务线程会一直处于阻塞状态。等到网络线程获得应答后，会通知业务线程继续运行后面的逻辑。
+
+可以看出，同步工作模式下，一个请求大体上有三组线程处理：服务端网络线程、业务线程、客户端网络线程。在请求处理过程中会经历线程切换。两端的网络线程运行于异步非阻塞的状态，可以用较少的线程数处理较多的请求。业务线程会有阻塞等待应答。
+
+因此，如果业务线程处理请求时间较长，请求可能会因为默认的业务线程数不足而进入排队状态。此时可以适当地调整业务线程池来缓解问题。  
+但是调大业务线程池容量不是万能的解决办法，这不仅仅是因为系统对线程数量有限制，也因为网络连接数的限制。由于HTTP协议的特性，provider服务实例在接收并处理一个服务请求时，对应的连接是一直处于占用状态的，直到该请求返回应答。（这里说的不是keep-alive，ServiceComb默认就是使用长连接。但是HTTP 1.x协议要求一个长连接上只能等上一个请求的应答返回了再发送下一个请求。）因此，即使业务线程数足够大了，也有可能因为网络连接数的不足而导致请求处理失败。
+
+> Tips: ServiceComb支持operation粒度的业务线程池配置。用户可以自定义业务线程池。
+
+### RestOverVertx传输方式、Reactive模式下的线程模型
+
+> 关于Reactive模式的前因后果，建议直接了解一下Netty和Vertx。
+
+[Reactive模式][Reactive模式]，简单地说是将所有的处理逻辑都运行在网络线程中，当一个请求到达服务端接口时，请求驱动网络线程运行provider端handler链、HttpServerFilter、业务逻辑。如果业务逻辑中有对其他服务的调用，则也应该采用Reactive调用方式以等待应答时避免阻塞网络线程。当调用的应答返回业务逻辑代码时，再由应答驱动网络线程继续运行接下来的逻辑。
+
+换言之，Reactive模式下，所有逻辑都是由请求、应答驱动网络线程执行的。代码逻辑跑到需要等待结果的地方时，线程就直接运行完成了，结果的处理逻辑由之后的网络线程处理。这样做的好处是没有线程处于阻塞等待的状态，CPU时间得以充分利用，线程上下文切换的次数也基本没有，因而性能较高。如果说ServiceComb同步工作模式是将高性能的Vertx框架包装成了开发习惯的同步模式，令开发人员既享受这同步代码风格开发的便利，又享受这异步非阻塞的性能，那么Reactive模式相当于将Vertx框架的高性能特性发挥得更加彻底，中间损耗更少。
+
+Reactive在性能方面有着巨大的优势，但是却并非完美无缺的。它最大的问题就是要求整个项目的代码都运行于异步非阻塞的状态。一旦有一些第三方系统只有同步接口，比如某些数据库驱动三方件，那么这些地方的调用就不能直接放在业务逻辑中，否则会造成网络线程阻塞，性能打折扣。而即使使用线程池将其隔离，也会因为线程上下文的切换而带来额外开销。同时，异步风格的代码有违一般开发人员的习惯，写出来的代码不如传统的同步风格代码那么容易理解、调试和定位问题。
+
+因此，是否使用Reactive模式进行开发，需要设计和开发人员结合实际情况进行取舍。
+
+> PS：
+> - 默认的EdgeService工作于Reactive模式，因为EdgeService几乎没有用户编写业务代码。当在EdgeService上开发扩展模块的时候，要注意不能阻塞了网络线程。
+> - 由于前文说到的业务线程池可以自行配置，所以通过REST接口返回类型是否是`CompletableFuture`来判断是否是Reactive的方法只能涵盖一般情况。最直接的方法是调试的时候在自己的业务代码里面打断点看一下线程的名字，像"pool-3-thread-3"这种名字的线程是业务线程，说明是同步工作模式；"transport-vert.x-eventloop-thread-4"这种名字是网络线程，说明是Reactive模式。
+
 ## Metrics和性能测试
+
+### Metrics
+
+ServiceComb提供了默认的性能统计模块，[Metrics][Metrics]。启用方法非常简单，在maven项目里引入`metrics-core`就可以了：
+```xml
+<dependency>
+  <groupId>org.apache.servicecomb</groupId>
+  <artifactId>metrics-core</artifactId>
+</dependency>
+```
+相关配置项请参看开源文档。
+
+使用Metrics模块可以查看丰富的性能数据，可以用于压测、性能对比等。
+
+### 性能测试
+
+性能测试和调优涉及到的内容相当多，这里只做一些最简单的说明。
+
+性能测试的结果受硬件规格的影响，只有综合讨论硬件条件、时延和tps才有意义。当tps达到性能瓶颈后，继续加压只会让时延上升；而tps不会继续上升，甚至还有可能下降。测试性能的时候，应该先限定能接受的时延，比如平均时延3ms，以此为限定条件来加压使tps上升至瓶颈处，观察硬件资源的消耗情况。如果tps达到瓶颈时，CPU和带宽占用率已经很高了，那么可以认为在此硬件条件下的性能上限就是这么多。在tps达到瓶颈而硬件资源还有较多剩余时，分析性能问题才有意义。
+
+作为参考，我们框架自带的性能测试代码在这里： https://github.com/apache/incubator-servicecomb-java-chassis/tree/master/demo/perf
+
+进行性能对比的时候，可以考虑将ServiceComb框架和其他框架运行在同一硬件环境中，结合资源的消耗情况分析对比。
+
+-----------------------------------------------------------
 
 # 扩展机制
 
 ## Handler机制
 
 ## HttpServerFilter/HttpClientFilter机制
+
+## 启动事件监听机制
 
 ## CSEJavaSDK中的加载机制总结
 
@@ -98,6 +236,8 @@
 ### handler.xml加载机制
 
 ### Spring Bean加载机制
+
+-----------------------------------------------------------
 
 # 常见问题及定位技巧
 
@@ -129,3 +269,12 @@ TODO: 还有代码自动生成的逻辑
 [手工定义服务契约]: https://docs.servicecomb.io/java-chassis/zh_CN/build-provider/define-contract.html "手工定义服务契约"
 [CodeFirst模式]: https://docs.servicecomb.io/java-chassis/zh_CN/build-provider/code-first.html "使用隐式契约（CodeFirst模式）"
 [使用Swagger注解]: https://docs.servicecomb.io/java-chassis/zh_CN/build-provider/swagger-annotation.html "使用Swagger注解"
+[服务监听地址和发布地址]: https://docs.servicecomb.io/java-chassis/zh_CN/build-provider/listen-address-and-publish-address.html "服务监听地址和发布地址"
+[访问服务中心]: https://docs.servicecomb.io/java-chassis/zh_CN/general-development/visit-sc.html  "访问服务中心"
+[RestTemplate调用]: https://docs.servicecomb.io/java-chassis/zh_CN/build-consumer/using-resttemplate.html "RestTemplate调用"
+[RPC调用]: https://docs.servicecomb.io/java-chassis/zh_CN/build-consumer/develop-consumer-using-rpc.html "RPC调用"
+[Reactive模式]: https://docs.servicecomb.io/java-chassis/zh_CN/general-development/reactive.html "Reactive模式"
+[动态配置]: https://docs.servicecomb.io/java-chassis/zh_CN/general-development/config.html "动态配置"
+[线程模型]: https://docs.servicecomb.io/java-chassis/zh_CN/build-provider/protocol/thread-model.html "线程模型"
+[RestOverVertx]: https://docs.servicecomb.io/java-chassis/zh_CN/build-provider/protocol/rest-over-vertx.html "RestOverVertx"
+[Metrics]: https://docs.servicecomb.io/java-chassis/zh_CN/general-development/metrics.html "Metrics"
