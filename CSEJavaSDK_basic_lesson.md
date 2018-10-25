@@ -62,7 +62,7 @@
 
 ### 接口定义
 
-关于使用[SpringMVC模式][用SpringMVC开发微服务]、[JAX-RS模式][用JAX-RS模式开发微服务]、[POJO模式][用透明RPC模式开发微服务]的具体方法，大家可以参考ServiceComb的开源文档。SpringMVC模式和JAX-RS模式的使用方式大体上和原生的一致，需要注意的是某些注解的作用会有变化，比如`@RequestParam`变成了仅从query中获取参数。如果碰到有些参数描述不好在SpringMVC、JAX-RS的原生注解中做的，可以[使用Swagger注解][使用Swagger注解]。
+关于使用[SpringMVC模式][用SpringMVC开发微服务]、[JAX-RS模式][用JAX-RS开发微服务]、[POJO模式][用透明RPC开发微服务]的具体方法，大家可以参考ServiceComb的开源文档。SpringMVC模式和JAX-RS模式的使用方式大体上和原生的一致，需要注意的是某些注解的作用会有变化，比如`@RequestParam`变成了仅从query中获取参数。如果碰到有些参数描述不好在SpringMVC、JAX-RS的原生注解中做的，可以[使用Swagger注解][使用Swagger注解]。
 
 在定义REST服务接口的时候，需要遵守一个原则，即服务接口能够被服务契约明确地描述出来。如果你觉得自己写的接口中有个方法的参数表无法明确地用契约描述，那么这种用法基本上就是不被ServiceComb支持的。例如，返回值类型是抽象类、使用一个Map来接收所有的query参数。
 > 抽象的返回值类型即使在provider端能够被序列化，在consumer端将其反序列时也会因为框架不知道该转换为何种具体类型而出问题；而使用Map来接收query参数，也会因为query参数信息的缺失而给中间的运行模型实现带来麻烦。因此，这些特性当前都是不支持的。
@@ -259,6 +259,14 @@ TODO: 还有代码自动生成的逻辑
 
 > 介绍服务启动及调用时的关键节点，介绍问题定位的基本界定方式
 
+-----------------------------------------------------------
+
+# 推荐阅读
+
+[ServiceComb的开放性设计][ServiceComb的开放性设计]
+
+<!-- 引用 -->
+
 [Java-Chassis代码库]: https://github.com/apache/incubator-servicecomb-java-chassis "ServiceComb-Java-Chassis代码库"
 [CSEJavaSDK华为云官网文档]: https://support.huaweicloud.com/devg-cse/cse_javaSDK.html "CSEJavaSDK华为云官网文档"
 [ServiceComb-Java-Chassis微服务系统架构]: https://docs.servicecomb.io/java-chassis/zh_CN/start/architecture.html "ServiceComb-Java-Chassis微服务系统架构"
@@ -278,3 +286,4 @@ TODO: 还有代码自动生成的逻辑
 [线程模型]: https://docs.servicecomb.io/java-chassis/zh_CN/build-provider/protocol/thread-model.html "线程模型"
 [RestOverVertx]: https://docs.servicecomb.io/java-chassis/zh_CN/build-provider/protocol/rest-over-vertx.html "RestOverVertx"
 [Metrics]: https://docs.servicecomb.io/java-chassis/zh_CN/general-development/metrics.html "Metrics"
+[ServiceComb的开放性设计]: https://bbs.huaweicloud.com/blogs/1fc9427c088611e89fc57ca23e93a89f "ServiceComb的开放性设计"
