@@ -378,6 +378,12 @@ Spring Bean加载机制是通用的开源加载机制，在此不再赘述，只
 与SC相关的问题一般是服务注册、实例注册、心跳、服务发现等。可以去`MicroserviceServiceCenterTask`里面看看它添加了哪些定时任务，这些任务跟服务注册、实例注册、服务发现、实例心跳相关。  
 更直接的办法是去`ServiceRegistryClientImpl`里面打断点调试，这里是ServiceComb连接SC的客户端，也是直接收发请求的地方。
 
+### CC相关的定位入口
+
+ServiceComb与CC的交互逻辑当前只有查询配置这一种，可以将断点打在`ConfigCenterClient.refreshMembers()`方法的内部，能够直接观察到发送的请求以及接收的应答。
+
+> ServiceComb连接SC、CC的客户端都是基于Vertx的，使用回调的handler接收应答。所以需要将断点打在handler代码块内部来观察结果。
+
 ## AccessLog
 
 ServiceComb提供了RestOverVertx传输模式下的[AccessLog][AccessLog]功能，该功能已经提供了不少默认的日志项。用户也可以通过`AccessLogItem`扩展机制自定义新的日志元素。ServiceComb的AccessLogItem打印机制是通过ServiceComb定义的`AccessLogHandler`挂载在[根Route][VertxRoute]上面的，日志实际打印的时间点是请求处理完成的时候。
@@ -387,12 +393,12 @@ ServiceComb提供了RestOverVertx传输模式下的[AccessLog][AccessLog]功能�
 
 -----------------------------------------------------------
 
-# 推荐阅读
+# 补充资料
 
 - [ServiceComb的开放性设计][ServiceComb的开放性设计]
-- 调用第三方服务
 - [InvocationContext][InvocationContext]
 - [AKSK认证鉴权问题][]
+- [调用第三方服务][]
 
 <!-- 引用 -->
 
@@ -424,4 +430,5 @@ ServiceComb提供了RestOverVertx传输模式下的[AccessLog][AccessLog]功能�
 [EdgeService]: https://docs.servicecomb.io/java-chassis/zh_CN/edge/by-servicecomb-sdk.html "EdgeService"
 [InvocationContext]: https://docs.servicecomb.io/java-chassis/zh_CN/general-development/context.html "使用Context传递控制消息"
 [AccessLog]: https://docs.servicecomb.io/java-chassis/zh_CN/build-provider/access-log-configuration.html "AccessLog"
-[AKSK认证鉴权问题]: https://bbs.huaweicloud.com/forum/thread-10335-1-1.html
+[AKSK认证鉴权问题]: https://bbs.huaweicloud.com/forum/thread-10335-1-1.html "AKSK认证鉴权问题"
+[调用第三方服务]: https://github.com/apache/incubator-servicecomb-docs/blob/master/java-chassis-reference/zh_CN/build-consumer/3rd-party-service-invoke.md "调用第三方服务"
