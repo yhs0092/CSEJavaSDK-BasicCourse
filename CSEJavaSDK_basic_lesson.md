@@ -354,28 +354,45 @@ Spring Bean加载机制是通用的开源加载机制，在此不再赘述，只
 `ProducerSchemaFactory`类的`createSchema()`方法实现了契约的加载和生成逻辑，在这里可以看到是先从目录加载契约，找不到文件再去根据接口类生成的。  
 生成契约逻辑的入口在`SwaggerGenerator.generate()`方法里。ServiceComb逐个扫描接口类、方法上的注解，将契约信息提取并设置到`Swagger`对象中，这个对象就是表示Swagger契约的数据对象。ServiceComb的契约生成机制中，基本上每个注解都有自己的处理类，例如`@RequestParam`对应的处理类就是`RequestParamAnnotationProcessor`，根据“注解名称.*Processor”的命名规则，基本在ServiceComb源代码里可以搜到所有的处理类。
 
-根据编程模型的不同，一些某编程模型特有的注解处理类会分类保存在三个不同的`SwaggerGeneratorContext`实现类中，`ProducerSchemaFactory`在创建`SwaggerGenerator`以生成契约时，会根据REST接口类上的注解选择一个合适的SwaggerGeneratorContext。由于SwaggerGeneratorContext也是使用SPI机制加载的，因此缺少某个实现类也不会报错。这有可能导致最后生成的接口契约不符合预期。  
-举个例子：如果由于某些问题，依赖包中少了
+根据编程模型的不同，一些某编程模型特有的注解处理类会分类保存在三个不同的`SwaggerGeneratorContext`实现类中，SDK启动的时候会先加载可用的SwaggerGeneratorContext，然后`ProducerSchemaFactory`在创建`SwaggerGenerator`以生成契约时，会根据REST接口类上的注解选择一个合适的SwaggerGeneratorContext。由于SwaggerGeneratorContext也是使用SPI机制加载的，因此缺少某个实现类也不会报错。这有可能导致最后生成的接口契约不符合预期。  
+举个例子：如果由于某些问题，依赖包中少了swagger-generator-springmvc包，那么框架加载的时候就少了SpringmvcSwaggerGeneratorContext，生成契约的时候无法按照SpringMVC方式生成，只能按照POJO方式处理。生成的契约内容就会和预期的不一致。
 
-契约文件的加载逻辑在`AbstractSchemaFactory`类的`loadSwagger()`方法中。如果碰到问题可以在这里打断点调试。
-TODO: 还有代码自动生成的逻辑
+> ServiceComb是根据打在REST接口类上的注解来确定使用哪种SwaggerGeneratorContext的。如果有@RequestMapping就使用SpringMVC的，如果有@Path就使用JAX-RS的，都没选中的话默认的是POJO的。
+
+所以契约生成出现问题时可以在上述类中打断点调试一下看看，一般能够基本确定问题。
 
 ## 请求接收、发送
 
-## 参数序列化、反序列化
+前文讲到一次请求被微服务处理的流程时，给出了一张流程示意图，这里面的扩展点也可以看做是请求处理的不同阶段，本地调试时也可以根据这张图打点。
+- 对于普通微服务provider而言，可以在`VertxRestDispatcher`的`onRequest(RoutingContext context)`方法上打点观察请求的接收。
+- SPI机制会打印加载的Filter，因此如果不清楚Filter在哪里被调用的话可以先在日志里面找到加载的Filter实现类，然后选取一个从中打点，就能从上层调用栈中找到所有的Filter了。
+- Handler实际上启用了哪些，这个从日志里面看不出来，不过有两个Handler是必定会启用的，可以在这里面打点切入。它们分别是provider端的`ProducerOperationHandler`和consumer端的`TransportClientHandler`，它们位于两条调用链的末端，相当于两个边界。ProducerOperationHandler处理完成后请求参数就要传递给业务逻辑代码了；TransportClientHandler处理完成后请求参数会过一遍client filter，然后就发送出去了。
+- 对于业务代码做请求调用的逻辑入口，RestTemplate可以直接走进去查看，而RPC方式可以在`Invoker`类的`invoke`方法里打个断点，`Invoker`是RPC调用方式的provider调用接口的动态代理，业务代码使用代理接口做调用时请求首先走到了这里。
 
-## 实例发现、负载均衡
+>  这里只是提了一下几个比较粗略的节点，具体情况还是需要开发者自己调试一下以获得更直观的认识。定位经验多了以后，你会发现其他地方也可以作为常用的调试切入点。
+
+## 与SC/CC的交互
+
+### SC相关的定位入口
+
+与SC相关的问题一般是服务注册、实例注册、心跳、服务发现等。可以去`MicroserviceServiceCenterTask`里面看看它添加了哪些定时任务，这些任务跟服务注册、实例注册、服务发现、实例心跳相关。  
+更直接的办法是去`ServiceRegistryClientImpl`里面打断点调试，这里是ServiceComb连接SC的客户端，也是直接收发请求的地方。
 
 ## AccessLog
 
+ServiceComb提供了RestOverVertx传输模式下的[AccessLog][AccessLog]功能，该功能已经提供了不少默认的日志项。用户也可以通过`AccessLogItem`扩展机制自定义新的日志元素。ServiceComb的AccessLogItem打印机制是通过ServiceComb定义的`AccessLogHandler`挂载在[根Route][VertxRoute]上面的，日志实际打印的时间点是请求处理完成的时候。
 
-> 介绍服务启动及调用时的关键节点，介绍问题定位的基本界定方式
+如果开启了AccessLog功能，启动日志中会打印这样一行日志：  
+"access log enabled, pattern = ..."
 
 -----------------------------------------------------------
 
 # 推荐阅读
 
-[ServiceComb的开放性设计][ServiceComb的开放性设计]
+- [ServiceComb的开放性设计][ServiceComb的开放性设计]
+- 调用第三方服务
+- [InvocationContext][InvocationContext]
+- [AKSK认证鉴权问题][]
 
 <!-- 引用 -->
 
@@ -405,3 +422,6 @@ TODO: 还有代码自动生成的逻辑
 [VertxRoute]: https://vertx.io/docs/apidocs/io/vertx/ext/web/Route.html "Vertx Route"
 [VertxHandler]: https://vertx.io/docs/apidocs/io/vertx/core/Handler.html "Vertx Handler"
 [EdgeService]: https://docs.servicecomb.io/java-chassis/zh_CN/edge/by-servicecomb-sdk.html "EdgeService"
+[InvocationContext]: https://docs.servicecomb.io/java-chassis/zh_CN/general-development/context.html "使用Context传递控制消息"
+[AccessLog]: https://docs.servicecomb.io/java-chassis/zh_CN/build-provider/access-log-configuration.html "AccessLog"
+[AKSK认证鉴权问题]: https://bbs.huaweicloud.com/forum/thread-10335-1-1.html
