@@ -339,13 +339,23 @@ SPI机制只要是扫描到了SPI加载文件就会加载扩展类的实例。�
 [INFO]   2. org.apache.servicecomb.common.rest.filter.tracing.TracingFilter. org.apache.servicecomb.foundation.common.utils.SPIServiceUtils.loadSortedService(SPIServiceUtils.java:79)
 ```
 
-handler.xml加载机制是ServiceComb专门用于Handler加载的，启动过程中扫描到了handler.xml也不一定会加载里面的扩展类，还需要将该扩展类配进handler链才会实例化该扩展类。handler.xml文件的加载过程不会打印日志。不过如果是本地调试的话，可以在HandlerConfigUtils类的loadConfig()方法里打断点查看配置文件加载情况。另外，如果在handler链配置上指定了某个handler，但是在配置文件中却找不到它，那么SDK会直接抛出错误`throw new Error("can not find handler :" + handlerId)`。
+handler.xml加载机制是ServiceComb专门用于Handler加载的，启动过程中扫描到了handler.xml也不一定会加载里面的扩展类，还需要将该扩展类配进handler链才会实例化该扩展类。  
+handler.xml文件的加载过程不会打印日志。不过如果是本地调试的话，可以在HandlerConfigUtils类的loadConfig()方法里打断点查看配置文件加载情况。另外，如果在handler链配置上指定了某个handler，但是在配置文件中却找不到它，那么SDK会直接抛出错误`throw new Error("can not find handler :" + handlerId)`。
 
-Spring Bean加载机制是通用的开源加载机制，在此不再赘述，只有两点需要补充说明一下。  
+Spring Bean加载机制是通用的开源加载机制，在此不再赘述，只有三点需要补充说明一下。  
+- ServiceComb的Spring Bean配置文件是classpath下的META-INF/spring/*.bean.xml文件（参看ServiceComb的`BeanUtils`类），框架启动的时候，Spring会将其加载的配置文件都打出来，内容为"Loading XML bean definitions from ..."
 - 有些开发者问询问为什么他们在自己扩展的Handler等类里面使用`@Autowired`或者`@Inject`标记的属性，在运行时会是`null`。这是因为Handler的加载机制是ServiceComb自己将handler实例"new"出来，不是走Spring Bean加载机制实例化的，因此Spring框架也不会对其做自动注入。碰到这种情况可以考虑使用ServiceComb的`BeanUtils`类提供的`getBean(String name)`方法来手动获取和设置Spring Bean。
 - 使用`BeanUtils.getBean(String name)`方法要注意调用的时间点，如果在Spring Bean还未加载完成时调用该方法，有可能会导致NoSuchBeanDefinitionException。另外在Spring Bean实例中建议直接使用Spring的依赖注入机制来初始化属性，不要使用`BeanUtils.getBean(String name)`方法。因为`BeanUtils.getBean(String name)`方法的调用不会被Spring框架纳入Spring Bean加载顺序的考虑范畴，因此也有可能由于Bean加载顺序的混乱而导致NoSuchBeanDefinitionException。
 
 ## 契约生成
+
+对于ServiceComb根据REST接口类自动生成契约的场景，ServiceComb的`RestProducers`和`PojoProducers`会过滤Spring加载的Bean，分别将其中打了`@RestSchema`和`@RpcSchema`的Bean记录下来。之后ServiceComb会遍历记录下来的Bean list，逐个生成契约并加载。
+
+`ProducerSchemaFactory`类的`createSchema()`方法实现了契约的加载和生成逻辑，在这里可以看到是先从目录加载契约，找不到文件再去根据接口类生成的。  
+生成契约逻辑的入口在`SwaggerGenerator.generate()`方法里。ServiceComb逐个扫描接口类、方法上的注解，将契约信息提取并设置到`Swagger`对象中，这个对象就是表示Swagger契约的数据对象。ServiceComb的契约生成机制中，基本上每个注解都有自己的处理类，例如`@RequestParam`对应的处理类就是`RequestParamAnnotationProcessor`，根据“注解名称.*Processor”的命名规则，基本在ServiceComb源代码里可以搜到所有的处理类。
+
+根据编程模型的不同，一些某编程模型特有的注解处理类会分类保存在三个不同的`SwaggerGeneratorContext`实现类中，`ProducerSchemaFactory`在创建`SwaggerGenerator`以生成契约时，会根据REST接口类上的注解选择一个合适的SwaggerGeneratorContext。由于SwaggerGeneratorContext也是使用SPI机制加载的，因此缺少某个实现类也不会报错。这有可能导致最后生成的接口契约不符合预期。  
+举个例子：如果由于某些问题，依赖包中少了
 
 契约文件的加载逻辑在`AbstractSchemaFactory`类的`loadSwagger()`方法中。如果碰到问题可以在这里打断点调试。
 TODO: 还有代码自动生成的逻辑
