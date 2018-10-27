@@ -395,10 +395,17 @@ ServiceComb提供了RestOverVertx传输模式下的[AccessLog][AccessLog]功能�
 
 # 补充资料
 
+- [ServiceComb GitBook][ServiceCombGitBook]
+- [CSEJavaSDK GitBook][CSEJavaSDKGitBook]
 - [ServiceComb的开放性设计][ServiceComb的开放性设计]
 - [InvocationContext][InvocationContext]
-- [AKSK认证鉴权问题][]
-- [调用第三方服务][]
+- [调用第三方服务]
+- [CSE博客]
+- [CSE论坛]
+
+> 提问渠道:
+>
+> 如果是开源SDK的问题的话，也可以考虑直接在社区提问。欢迎大家[订阅邮件列表][]、[使用Gitter聊天室][]或者直接[在Github上提issue][ServiceCombIssues]。
 
 <!-- 引用 -->
 
@@ -432,3 +439,10 @@ ServiceComb提供了RestOverVertx传输模式下的[AccessLog][AccessLog]功能�
 [AccessLog]: https://docs.servicecomb.io/java-chassis/zh_CN/build-provider/access-log-configuration.html "AccessLog"
 [AKSK认证鉴权问题]: https://bbs.huaweicloud.com/forum/thread-10335-1-1.html "AKSK认证鉴权问题"
 [调用第三方服务]: https://github.com/apache/incubator-servicecomb-docs/blob/master/java-chassis-reference/zh_CN/build-consumer/3rd-party-service-invoke.md "调用第三方服务"
+[订阅邮件列表]: https://servicecomb.incubator.apache.org/cn/developers/subscribe-mail-list/ "如何订阅Apache ServiceComb (incubating) 的邮件列表 - Apache ServiceComb"
+[使用Gitter聊天室]: https://servicecomb.incubator.apache.org/cn/developers/use-gitter/ "Gitter 使用指南 - Apache ServiceComb"
+[ServiceCombIssues]: https://github.com/apache/incubator-servicecomb-java-chassis/issues "ServiceComb issue 列表"
+[ServiceCombGitBook]: https://docs.servicecomb.io/java-chassis/zh_CN/index.html "GitBook - Apache ServiceComb (incubating) Java Chassis"
+[CSEJavaSDKGitBook]: https://huaweicse.github.io/cse-java-chassis-doc/ "GitBook - CSEJavaSDK"
+[CSE博客]: https://bbs.huaweicloud.com/blogs "CSE博客"
+[CSE论坛]: https://bbs.huaweicloud.com/forum/forum-622-1.html "CSE论坛"
